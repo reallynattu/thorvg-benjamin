@@ -101,6 +101,9 @@ struct TaskQueue
     }
 };
 
+// The task id of this thread when it is one of the scheduler's workers, 0 otherwise.
+static thread_local unsigned workerTid = 0;
+
 struct TaskSchedulerImpl
 {
     Array<thread*>                 threads;
@@ -117,7 +120,7 @@ struct TaskSchedulerImpl
             threads.push(new thread);
         }
         for (uint32_t i = 0; i < threadCnt; ++i) {
-            *threads.data[i] = thread([&, i] { run(i); });
+            *threads.data[i] = thread([&, i] { workerTid = i + 1; run(i); });
         }
     }
 
@@ -185,7 +188,15 @@ struct TaskSchedulerImpl
     void request(Task* task)
     {
         if (threads.empty()) task->run(0);        // sync
-        else if (task->prepare()) enqueue(task);  // async
+        else if (task->prepare()) {
+            // A worker asking for a task runs it itself. Queued, it could sit behind the worker
+            // that waits on it (an image a Lottie's assets load, decoded while the loader runs),
+            // with the other workers asleep on their own queues: neither would ever run.
+            if (workerTid) {
+                task->run(workerTid);
+                complete(task);
+            } else enqueue(task);                 // async
+        }
     }
 
     uint32_t threadCnt()
